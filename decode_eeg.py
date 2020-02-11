@@ -1,30 +1,38 @@
-import re
 from pathlib import Path
 import scipy.io as sio
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix
+import mord
+
 
 class Experiment:
-    def __init__(self,experiment_name,data_dir):
+    def __init__(self,experiment_name,data_dir,test=False):
 
         self.experiment_name = experiment_name
         self.data_dir = Path(data_dir)
 
         self.xdata_files = list(self.data_dir.glob('*xdata*.mat'))
         self.ydata_files = list(self.data_dir.glob('*ydata*.mat'))
+        if test:
+            self.xdata_files = [self.xdata_files[0]]
+            self.ydata_files = [self.ydata_files[0]]
         self.nsub = len(self.xdata_files)
+
 
         self.behavior_files = None
         self.artifact_idx_files = None
 
-    def load_eeg(self,xdata_filepath,ydata_filepath):
-        subj_mat = sio.loadmat(xdata_filepath,variable_names=['xdata'])
+    def load_eeg(self,isub):
+        subj_mat = sio.loadmat(self.xdata_files[0],variable_names=['xdata'])
         xdata = np.moveaxis(subj_mat['xdata'],[0,1,2],[1,2,0])
 
-        subj_mat = sio.loadmat(ydata_filepath,variable_names=['ydata'])
+        subj_mat = sio.loadmat(self.ydata_files[0],variable_names=['ydata'])
         ydata = np.squeeze(subj_mat['ydata'])
 
+        print(f'Subject: {isub}/{self.nsub-1}')
         return xdata, ydata
 
     def load_behavior(self, isub, remove_artifact_trials=True):
@@ -62,25 +70,26 @@ class Experiment:
 
 class Wrangler:
     def __init__(self,
-        samples, sampling_rate,
+        samples,
         time_window, time_step,
         trial_average,
         n_splits,
-        electrodes = None, include_labels = None):
+        labels,
+        electrodes = None):
 
         self.samples = samples
-        self.sample_rate = sampling_rate
-        self.sample_step = sampling_rate/1000
+        self.sample_step = samples[1]-samples[0]
         self.time_window = time_window
         self.time_step = time_step
         self.trial_average = trial_average
         self.n_splits = n_splits
+        self.labels = labels
+        self.n_labels = len(labels)
         self.electrodes = electrodes
-        self.include_labels = include_labels
 
         self.cross_val = StratifiedShuffleSplit(n_splits=self.n_splits)
 
-        self.t = self.times[0:self.num_times-int(self.time_bin_size/2)+1:int(self.time_bin_offset/2)]
+        self.t = samples[0:samples.shape[0]-int(time_window/self.sample_step)+1:int(time_step/self.sample_step)]
         
     def select_labels(self, xdata, ydata):
         """
@@ -91,10 +100,10 @@ class Wrangler:
         xdata: eeg data, shape[electrodes,timepoints,trials]
         ydata: labels, shape[trials]
         """
-        if self.include_labels:
-            restriction_idx = np.isin(ydata,self.include_labels)
-            xdata = xdata[restriction_idx,:,:]
-            ydata = ydata[restriction_idx]
+
+        restriction_idx = np.isin(ydata,self.labels)
+        xdata = xdata[restriction_idx,:,:]
+        ydata = ydata[restriction_idx]
 
         return xdata, ydata
 
@@ -127,11 +136,17 @@ class Wrangler:
             ydata_new = np.repeat(unique_labels,nbin)
             return xdata_new, ydata_new
         else: return xdata,ydata
+    
+    def setup_data(self,xdata,ydata):
+        xdata,ydata = self.select_labels(xdata,ydata)
+        xdata,ydata = self.balance_labels(xdata,ydata)
+        xdata,ydata = self.average_trials(xdata,ydata)
+        return xdata,ydata
 
     def train_test_split(self, xdata, ydata):
         """
         returns xtrain and xtest data and respective labels
-        """
+        """        
         self.ifold = 0
         for train_index, test_index in self.cross_val.split(xdata[:,0,0], ydata):
         
@@ -140,3 +155,62 @@ class Wrangler:
 
             yield X_train_all, X_test_all, y_train, y_test
             self.ifold += 1
+    
+    def roll_over_time(self, X_train_all, X_test_all):
+        """
+        returns one timepoint of EEG trial at a time
+        """
+        for self.itime, time in enumerate(self.t):
+            time_window_idx = (self.samples >= time) & (self.samples < time + self.time_window)
+
+            # Data for this time bin
+            X_train = np.mean(X_train_all[...,time_window_idx],2)
+            X_test = np.mean(X_test_all[...,time_window_idx],2)
+
+            yield X_train, X_test
+
+class Classification:
+    def __init__(self,exp,wrangl,classifier=None):
+        self.wrangl = wrangl
+        self.n_splits = wrangl.n_splits
+        self.t = wrangl.t
+        self.n_labels = wrangl.n_labels
+        self.exp = exp
+        if classifier:
+            self.classifier = classifier
+        else:
+            self.classifier = mord.LogisticIT()
+        self.scaler = StandardScaler()
+
+        self.acc = np.zeros((self.exp.nsub,np.size(self.t),self.n_splits))*np.nan
+        self.acc_shuff = np.zeros((self.exp.nsub,np.size(self.t),self.n_splits))*np.nan
+        self.conf_mat = np.zeros((self.exp.nsub,np.size(self.t),self.n_splits,self.n_labels,self.n_labels))*np.nan
+
+    def standardize(self, X_train, X_test):
+        """
+        z-score each electrode across trials at this time point
+
+        returns standardized train and test data 
+        Note: this fits and transforms train data, then transforms test data with mean and std of train data!!!
+        """
+
+        # Fit scaler to X_train and transform X_train
+        X_train = self.scaler.fit_transform(X_train)
+        X_test = self.scaler.transform(X_test)
+
+        return X_train, X_test
+
+    def decode(self, X_train, X_test, y_train, y_test, isub):
+        ifold = self.wrangl.ifold
+        itime = self.wrangl.itime
+
+        X_train, X_test = self.standardize(X_train, X_test)
+        
+        self.classifier.fit(X_train, y_train)
+
+        self.acc[isub,itime,ifold] = self.classifier.score(X_test,y_test)
+        self.acc_shuff[isub,itime,ifold] = self.classifier.score(X_test,np.random.permutation(y_test))
+        self.conf_mat[isub,itime,ifold] = confusion_matrix(y_test,y_pred=self.classifier.predict(X_test))
+
+        print(f'{round(((ifold+1)/self.n_splits)*100,1)}% ',end='\r')
+
