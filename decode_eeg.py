@@ -2,11 +2,12 @@ from pathlib import Path
 import scipy.io as sio
 import numpy as np
 import pandas as pd
+import json
+
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix
 import mord
-
 
 class Experiment:
     def __init__(self,experiment_name,data_dir,test=False):
@@ -21,7 +22,6 @@ class Experiment:
             self.ydata_files = [self.ydata_files[0]]
         self.nsub = len(self.xdata_files)
 
-
         self.behavior_files = None
         self.artifact_idx_files = None
 
@@ -32,7 +32,6 @@ class Experiment:
         subj_mat = sio.loadmat(self.ydata_files[0],variable_names=['ydata'])
         ydata = np.squeeze(subj_mat['ydata'])
 
-        print(f'Subject: {isub}/{self.nsub-1}')
         return xdata, ydata
 
     def load_behavior(self, isub, remove_artifact_trials=True):
@@ -67,6 +66,60 @@ class Experiment:
 
         return artifact_idx
 
+class Experiment_Syncer:
+    def __init__(
+        self,
+        experiments,
+        train_test_idx
+    ):
+        self.experiments = experiments
+        self.train_test_idx = train_test_idx
+        self.experiment_names = []
+        for i in range(len(experiments)):
+            self.experiment_names.append(experiments[i].experiment_name)
+
+    def _load_unique_ids(self):
+        all_ids = []
+        for exp in self.experiments:
+            exp.unique_ids = []
+            for filename in list(exp.data_dir.glob('*.txt')):
+                with open(filename) as f:
+                    exp.unique_ids.append(str(json.load(f)))
+            all_ids.extend(exp.unique_ids)
+        self.unique_ids = np.unique(all_ids)
+
+    def _sync_unique_ids(self):
+        self._load_unique_ids()
+        self.matched_ids=[]
+        
+        for i in self.unique_ids:
+            check = 0
+            for exp in self.experiments:
+                if i in exp.unique_ids:
+                    check+=1
+            if check == len(self.experiments):
+                self.matched_ids.append(i)
+
+        self.id_dict = dict.fromkeys(self.matched_ids)
+        for k in self.id_dict.keys():
+            self.id_dict[k] = dict.fromkeys(self.experiment_names)
+
+        for exp in self.experiments:
+            for m in self.matched_ids:
+                try:
+                    self.id_dict[m][exp.experiment_name] = exp.unique_ids.index(m)
+                except ValueError:
+                    pass
+    
+    def load_synced_ids(self):
+        self._sync_unique_ids()
+
+        for u in self.matched_ids:
+            r = []
+            for exp in self.experiments:
+                r.append(exp.load_eeg(self.id_dict[u][exp.experiment_name]))
+            yield r
+            
 
 class Wrangler:
     def __init__(self,
