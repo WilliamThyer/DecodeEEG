@@ -70,15 +70,21 @@ class Experiment_Syncer:
     def __init__(
         self,
         experiments,
-        train_test_idx
+        wrangler,
+        train_idx
     ):
         self.experiments = experiments
-        self.train_test_idx = train_test_idx
+        self.wrangler = wrangler
+        self.train_idx = train_idx
         self.experiment_names = []
         for i in range(len(experiments)):
             self.experiment_names.append(experiments[i].experiment_name)
 
+        self._load_unique_ids()
+        self._find_matched_ids()
+
     def _load_unique_ids(self):
+
         all_ids = []
         for exp in self.experiments:
             exp.unique_ids = []
@@ -86,19 +92,17 @@ class Experiment_Syncer:
                 with open(filename) as f:
                     exp.unique_ids.append(str(json.load(f)))
             all_ids.extend(exp.unique_ids)
-        self.unique_ids = np.unique(all_ids)
 
-    def _sync_unique_ids(self):
-        self._load_unique_ids()
         self.matched_ids=[]
-        
-        for i in self.unique_ids:
+        for i in np.unique(all_ids):
             check = 0
             for exp in self.experiments:
                 if i in exp.unique_ids:
                     check+=1
             if check == len(self.experiments):
                 self.matched_ids.append(i)
+        
+    def _find_matched_ids(self):
 
         self.id_dict = dict.fromkeys(self.matched_ids)
         for k in self.id_dict.keys():
@@ -110,16 +114,38 @@ class Experiment_Syncer:
                     self.id_dict[m][exp.experiment_name] = exp.unique_ids.index(m)
                 except ValueError:
                     pass
-    
-    def load_synced_ids(self):
-        self._sync_unique_ids()
 
-        for u in self.matched_ids:
-            r = []
-            for exp in self.experiments:
-                r.append(exp.load_eeg(self.id_dict[u][exp.experiment_name]))
-            yield r
-            
+    def load_eeg(self,sub):
+        xdata = dict.fromkeys(self.experiment_names)
+        ydata = dict.fromkeys(self.experiment_names)
+        for exp in self.experiments:
+            xdata[exp.experiment_name],ydata[exp.experiment_name] = exp.load_eeg(self.id_dict[sub][exp.experiment_name])
+        return xdata, ydata
+
+    def select_labels(self,xdata,ydata):
+        for exp_name in self.experiment_names:
+            xdata[exp_name],ydata[exp_name] = self.wrangler.select_labels(xdata[exp_name],ydata[exp_name])
+        return xdata,ydata
+
+    def balance_labels(self,xdata,ydata):
+        #right now this just balances within experiment, not across
+        for exp_name in self.experiment_names:
+            xdata[exp_name],ydata[exp_name] = self.wrangler.balance_labels(xdata[exp_name],ydata[exp_name])
+        return xdata,ydata
+    
+    def average_trials(self,xdata,ydata):
+        for exp_name in self.experiment_names:
+            xdata[exp_name],ydata[exp_name] = self.wrangler.average_trials(xdata[exp_name],ydata[exp_name])
+        return xdata,ydata
+    
+    def setup_data(self,xdata,ydata):
+        xdata,ydata = self.select_labels(xdata,ydata)
+        xdata,ydata = self.balance_labels(xdata,ydata)
+        xdata,ydata = self.average_trials(xdata,ydata)
+        return xdata,ydata
+
+    def group_data(self,xdata,ydata):
+        
 
 class Wrangler:
     def __init__(self,
@@ -223,21 +249,21 @@ class Wrangler:
             yield X_train, X_test
 
 class Classification:
-    def __init__(self,exp,wrangl,classifier=None):
+    def __init__(self,wrangl,nsub,classifier=None):
         self.wrangl = wrangl
         self.n_splits = wrangl.n_splits
         self.t = wrangl.t
         self.n_labels = wrangl.n_labels
-        self.exp = exp
+        self.nsub = nsub
         if classifier:
             self.classifier = classifier
         else:
             self.classifier = mord.LogisticIT()
         self.scaler = StandardScaler()
 
-        self.acc = np.zeros((self.exp.nsub,np.size(self.t),self.n_splits))*np.nan
-        self.acc_shuff = np.zeros((self.exp.nsub,np.size(self.t),self.n_splits))*np.nan
-        self.conf_mat = np.zeros((self.exp.nsub,np.size(self.t),self.n_splits,self.n_labels,self.n_labels))*np.nan
+        self.acc = np.zeros((self.nsub,np.size(self.t),self.n_splits))*np.nan
+        self.acc_shuff = np.zeros((self.nsub,np.size(self.t),self.n_splits))*np.nan
+        self.conf_mat = np.zeros((self.nsub,np.size(self.t),self.n_splits,self.n_labels,self.n_labels))*np.nan
 
     def standardize(self, X_train, X_test):
         """
