@@ -26,10 +26,10 @@ class Experiment:
         self.artifact_idx_files = None
 
     def load_eeg(self,isub):
-        subj_mat = sio.loadmat(self.xdata_files[0],variable_names=['xdata'])
+        subj_mat = sio.loadmat(self.xdata_files[isub],variable_names=['xdata'])
         xdata = np.moveaxis(subj_mat['xdata'],[0,1,2],[1,2,0])
 
-        subj_mat = sio.loadmat(self.ydata_files[0],variable_names=['ydata'])
+        subj_mat = sio.loadmat(self.ydata_files[isub],variable_names=['ydata'])
         ydata = np.squeeze(subj_mat['ydata'])
 
         return xdata, ydata
@@ -71,11 +71,11 @@ class Experiment_Syncer:
         self,
         experiments,
         wrangler,
-        train_idx
+        train_group
     ):
         self.experiments = experiments
         self.wrangler = wrangler
-        self.train_idx = train_idx
+        self.train_group = train_group
         self.experiment_names = []
         for i in range(len(experiments)):
             self.experiment_names.append(experiments[i].experiment_name)
@@ -145,7 +145,24 @@ class Experiment_Syncer:
         return xdata,ydata
 
     def group_data(self,xdata,ydata):
-        
+        xdata_train,xdata_test=None,None
+
+        for exp_name in self.experiment_names:
+            if np.isin(exp_name,self.train_group):
+                if xdata_train is not None:
+                    xdata_train = np.append(xdata_train,xdata[exp_name],0)
+                    ydata_train = np.append(ydata_train,ydata[exp_name],0)
+                elif xdata_train is None:
+                    xdata_train = xdata[exp_name]
+                    ydata_train = ydata[exp_name]
+            else:
+                if xdata_test is not None:
+                    xdata_test = np.append(xdata_test,xdata[exp_name],0)
+                    ydata_test = np.append(ydata_test,ydata[exp_name],0)
+                elif xdata_test == None:
+                    xdata_test = xdata[exp_name]
+                    ydata_test = ydata[exp_name]
+        return xdata_train,xdata_test,ydata_train,ydata_test
 
 class Wrangler:
     def __init__(self,
@@ -153,7 +170,6 @@ class Wrangler:
         time_window, time_step,
         trial_average,
         n_splits,
-        labels,
         electrodes = None):
 
         self.samples = samples
@@ -162,15 +178,13 @@ class Wrangler:
         self.time_step = time_step
         self.trial_average = trial_average
         self.n_splits = n_splits
-        self.labels = labels
-        self.n_labels = len(labels)
         self.electrodes = electrodes
 
         self.cross_val = StratifiedShuffleSplit(n_splits=self.n_splits)
 
         self.t = samples[0:samples.shape[0]-int(time_window/self.sample_step)+1:int(time_step/self.sample_step)]
         
-    def select_labels(self, xdata, ydata):
+    def select_labels(self, xdata, ydata, labels):
         """
         includes labels only wanted for decoding
 
@@ -180,16 +194,28 @@ class Wrangler:
         ydata: labels, shape[trials]
         """
 
-        restriction_idx = np.isin(ydata,self.labels)
-        xdata = xdata[restriction_idx,:,:]
-        ydata = ydata[restriction_idx]
+        label_idx = np.isin(ydata,labels)
+        xdata = xdata[label_idx,:,:]
+        ydata = ydata[label_idx]
 
         return xdata, ydata
 
-    def balance_labels(self,xdata,ydata):
-        unique_labels, counts_labels = np.unique(ydata, return_counts=True)
-        downsamp = min(counts_labels)
+    def group_labels(self,xdata,ydata,group_dict,empty_val=9999):
         
+        xdata_new = np.ones(xdata.shape)*empty_val
+        ydata_new = np.ones(ydata.shape)*empty_val
+        for k in group_dict.keys():
+            trial_idx = np.arange(ydata.shape[0])[np.isin(ydata,group_dict[k])]
+            xdata_new[trial_idx] = xdata[trial_idx]
+            ydata_new[trial_idx] = k
+
+        trial_idx = ydata_new == empty_val
+        return xdata_new[~trial_idx],ydata_new[~trial_idx]
+        
+    def balance_labels(self,xdata,ydata,downsamp=None):
+        unique_labels, counts_labels = np.unique(ydata, return_counts=True)
+        if downsamp is None:
+            downsamp = min(counts_labels)
         label_idx=[]
         for label in unique_labels:
             label_idx = np.append(label_idx,np.random.choice(np.arange(len(ydata))[ydata == label],downsamp,replace=False))
@@ -216,8 +242,9 @@ class Wrangler:
             return xdata_new, ydata_new
         else: return xdata,ydata
     
-    def setup_data(self,xdata,ydata):
-        xdata,ydata = self.select_labels(xdata,ydata)
+    def setup_data(self,xdata,ydata,labels=None):
+        if labels:
+            xdata,ydata = self.select_labels(xdata,ydata,labels)
         xdata,ydata = self.balance_labels(xdata,ydata)
         xdata,ydata = self.average_trials(xdata,ydata)
         return xdata,ydata
@@ -253,7 +280,6 @@ class Classification:
         self.wrangl = wrangl
         self.n_splits = wrangl.n_splits
         self.t = wrangl.t
-        self.n_labels = wrangl.n_labels
         self.nsub = nsub
         if classifier:
             self.classifier = classifier
@@ -263,7 +289,7 @@ class Classification:
 
         self.acc = np.zeros((self.nsub,np.size(self.t),self.n_splits))*np.nan
         self.acc_shuff = np.zeros((self.nsub,np.size(self.t),self.n_splits))*np.nan
-        self.conf_mat = np.zeros((self.nsub,np.size(self.t),self.n_splits,self.n_labels,self.n_labels))*np.nan
+        self.conf_mat = np.zeros((self.nsub,np.size(self.t),self.n_splits,4,4))*np.nan
 
     def standardize(self, X_train, X_test):
         """
