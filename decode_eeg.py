@@ -114,6 +114,7 @@ class Experiment_Syncer:
                     self.id_dict[m][exp.experiment_name] = exp.unique_ids.index(m)
                 except ValueError:
                     pass
+        self.nsub = len(self.matched_ids)
 
     def load_eeg(self,sub):
         xdata = dict.fromkeys(self.experiment_names)
@@ -127,6 +128,11 @@ class Experiment_Syncer:
             xdata[exp_name],ydata[exp_name] = self.wrangler.select_labels(xdata[exp_name],ydata[exp_name])
         return xdata,ydata
 
+    def group_labels(self,xdata,ydata,group_dict):
+        for exp_name in self.experiment_names:
+            xdata[exp_name],ydata[exp_name] = self.wrangler.group_labels(xdata[exp_name],ydata[exp_name],group_dict)
+        return xdata,ydata
+
     def balance_labels(self,xdata,ydata):
         #right now this just balances within experiment, not across
         for exp_name in self.experiment_names:
@@ -138,8 +144,11 @@ class Experiment_Syncer:
             xdata[exp_name],ydata[exp_name] = self.wrangler.average_trials(xdata[exp_name],ydata[exp_name])
         return xdata,ydata
     
-    def setup_data(self,xdata,ydata):
-        xdata,ydata = self.select_labels(xdata,ydata)
+    def setup_data(self,xdata,ydata,labels=None,group_dict=None):
+        if labels:
+            xdata,ydata = self.select_labels(xdata,ydata)
+        if group_dict:
+            xdata,ydata = self.group_labels(xdata,ydata,group_dict)
         xdata,ydata = self.balance_labels(xdata,ydata)
         xdata,ydata = self.average_trials(xdata,ydata)
         return xdata,ydata
@@ -242,9 +251,11 @@ class Wrangler:
             return xdata_new, ydata_new
         else: return xdata,ydata
     
-    def setup_data(self,xdata,ydata,labels=None):
+    def setup_data(self,xdata,ydata,labels=None,group_dict=None):
         if labels:
             xdata,ydata = self.select_labels(xdata,ydata,labels)
+        if group_dict:
+            xdata,ydata = self.group_labels(xdata,ydata,group_dict)
         xdata,ydata = self.balance_labels(xdata,ydata)
         xdata,ydata = self.average_trials(xdata,ydata)
         return xdata,ydata
@@ -274,6 +285,21 @@ class Wrangler:
             X_test = np.mean(X_test_all[...,time_window_idx],2)
 
             yield X_train, X_test
+
+    def train_test_custom_split(self,xdata_train,xdata_test,ydata_train,ydata_test):
+
+        
+        cross_val_test = StratifiedShuffleSplit(n_splits=1)
+        self.ifold = 0
+        for train_index,_ in self.cross_val.split(xdata_train,ydata_train):
+            X_train_all, y_train = xdata_train[train_index], ydata_train[train_index].astype(int)
+            
+            for _,test_index in cross_val_test.split(xdata_test,ydata_test):
+                X_test_all, y_test = xdata_test[test_index], ydata_test[test_index].astype(int)
+            
+            yield X_train_all, X_test_all, y_train, y_test
+            self.ifold += 1
+            
 
 class Classification:
     def __init__(self,wrangl,nsub,classifier=None):
