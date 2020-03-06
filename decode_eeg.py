@@ -24,6 +24,7 @@ class Experiment:
 
         self.behavior_files = None
         self.artifact_idx_files = None
+        self.info_files = None
 
     def load_eeg(self,isub):
         subj_mat = sio.loadmat(self.xdata_files[isub],variable_names=['xdata'])
@@ -65,6 +66,18 @@ class Experiment:
         artifact_idx = np.squeeze(sio.loadmat(self.artifact_idx_files[isub])['filt_idx']==1)
 
         return artifact_idx
+    
+    def load_info(self, isub, variable_names = ['unique_id','chan_labels','chan_x','chan_y','chan_z','sampling_rate','times']):
+        """ 
+        loads info file that contains data about EEG file and subject
+        """
+        if not self.info_files:
+            self.info_files = list(self.data_dir.glob('*info*.mat'))
+        info_file = sio.loadmat(self.info_files[isub],variable_names=variable_names)
+        
+        info = {k: np.squeeze(info_file[k]) for k in variable_names}
+        
+        return info
 
 class Experiment_Syncer:
     def __init__(
@@ -175,7 +188,6 @@ class Experiment_Syncer:
 
 class Wrangler:
     def __init__(self,
-        samples,
         time_window, time_step,
         trial_average,
         n_splits,
@@ -288,7 +300,6 @@ class Wrangler:
 
     def train_test_custom_split(self,xdata_train,xdata_test,ydata_train,ydata_test):
 
-        
         cross_val_test = StratifiedShuffleSplit(n_splits=1)
         self.ifold = 0
         for train_index,_ in self.cross_val.split(xdata_train,ydata_train):
@@ -299,7 +310,6 @@ class Wrangler:
             
             yield X_train_all, X_test_all, y_train, y_test
             self.ifold += 1
-            
 
 class Classification:
     def __init__(self,wrangl,nsub,classifier=None):
