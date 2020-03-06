@@ -100,13 +100,12 @@ class Experiment_Syncer:
         self._find_matched_ids()
 
     def _load_unique_ids(self):
-
+        
         all_ids = []
         for exp in self.experiments:
             exp.unique_ids = []
-            for filename in list(exp.data_dir.glob('*info*.mat')):
-                with open(filename) as f:
-                    exp.unique_ids.append(str(json.load(f)))
+            for isub in range(exp.nsub):
+                exp.unique_ids.append(int(exp.load_info(isub)['unique_id']))
             all_ids.extend(exp.unique_ids)
 
         self.matched_ids=[]
@@ -333,7 +332,6 @@ class Classification:
         self.t = wrangl.t
         if num_labels: self.num_labels = num_labels
         if wrangl.num_labels: self.num_labels = wrangl.num_labels
-
         if self.num_labels is None: 
             raise Exception('Must provide number of num_labels to Classification')
             
