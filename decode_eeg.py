@@ -192,6 +192,7 @@ class Experiment_Syncer:
 
 class Wrangler:
     def __init__(self,
+        samples,
         time_window, time_step,
         trial_average,
         n_splits,
