@@ -78,7 +78,6 @@ class Experiment:
         if not self.info_files:
             self.info_files = list(self.data_dir.glob('*info*.mat'))
         info_file = sio.loadmat(self.info_files[isub],variable_names=variable_names)
-        
         info = {k: np.squeeze(info_file[k]) for k in variable_names}
         
         return info
@@ -105,7 +104,7 @@ class Experiment_Syncer:
         all_ids = []
         for exp in self.experiments:
             exp.unique_ids = []
-            for filename in list(exp.data_dir.glob('*.txt')):
+            for filename in list(exp.data_dir.glob('*info*.mat')):
                 with open(filename) as f:
                     exp.unique_ids.append(str(json.load(f)))
             all_ids.extend(exp.unique_ids)
@@ -196,6 +195,8 @@ class Wrangler:
         time_window, time_step,
         trial_average,
         n_splits,
+        group_dict = None,
+        labels = None,
         electrodes = None):
 
         self.samples = samples
@@ -204,13 +205,22 @@ class Wrangler:
         self.time_step = time_step
         self.trial_average = trial_average
         self.n_splits = n_splits
+        self.group_dict = group_dict
+        self.labels = labels
         self.electrodes = electrodes
+
+        if self.group_dict: 
+            self.labels = self.group_dict.keys()
+        if self.labels:
+            self.num_labels = len(self.labels)
+        else:
+            self.num_labels = None
 
         self.cross_val = StratifiedShuffleSplit(n_splits=self.n_splits)
 
         self.t = samples[0:samples.shape[0]-int(time_window/self.sample_step)+1:int(time_step/self.sample_step)]
         
-    def select_labels(self, xdata, ydata, labels):
+    def select_labels(self, xdata, ydata):
         """
         includes labels only wanted for decoding
 
@@ -220,18 +230,18 @@ class Wrangler:
         ydata: labels, shape[trials]
         """
 
-        label_idx = np.isin(ydata,labels)
+        label_idx = np.isin(ydata,self.labels)
         xdata = xdata[label_idx,:,:]
         ydata = ydata[label_idx]
 
         return xdata, ydata
 
-    def group_labels(self,xdata,ydata,group_dict,empty_val=9999):
+    def group_labels(self,xdata,ydata,empty_val=9999):
         
         xdata_new = np.ones(xdata.shape)*empty_val
         ydata_new = np.ones(ydata.shape)*empty_val
-        for k in group_dict.keys():
-            trial_idx = np.arange(ydata.shape[0])[np.isin(ydata,group_dict[k])]
+        for k in self.group_dict.keys():
+            trial_idx = np.arange(ydata.shape[0])[np.isin(ydata,self.group_dict[k])]
             xdata_new[trial_idx] = xdata[trial_idx]
             ydata_new[trial_idx] = k
 
@@ -269,10 +279,10 @@ class Wrangler:
         else: return xdata,ydata
     
     def setup_data(self,xdata,ydata,labels=None,group_dict=None):
-        if labels:
-            xdata,ydata = self.select_labels(xdata,ydata,labels)
-        if group_dict:
-            xdata,ydata = self.group_labels(xdata,ydata,group_dict)
+        if self.group_dict:
+            xdata,ydata = self.group_labels(xdata,ydata)
+        elif self.labels:
+            xdata,ydata = self.select_labels(xdata,ydata)
         xdata,ydata = self.balance_labels(xdata,ydata)
         xdata,ydata = self.average_trials(xdata,ydata)
         return xdata,ydata
@@ -317,11 +327,18 @@ class Wrangler:
             self.ifold += 1
 
 class Classification:
-    def __init__(self,wrangl,nsub,classifier=None):
+    def __init__(self, wrangl, nsub, num_labels = None, classifier=None):
         self.wrangl = wrangl
         self.n_splits = wrangl.n_splits
         self.t = wrangl.t
+        if num_labels: self.num_labels = num_labels
+        if wrangl.num_labels: self.num_labels = wrangl.num_labels
+
+        if self.num_labels is None: 
+            raise Exception('Must provide number of num_labels to Classification')
+            
         self.nsub = nsub
+
         if classifier:
             self.classifier = classifier
         else:
@@ -330,7 +347,7 @@ class Classification:
 
         self.acc = np.zeros((self.nsub,np.size(self.t),self.n_splits))*np.nan
         self.acc_shuff = np.zeros((self.nsub,np.size(self.t),self.n_splits))*np.nan
-        self.conf_mat = np.zeros((self.nsub,np.size(self.t),self.n_splits,4,4))*np.nan
+        self.conf_mat = np.zeros((self.nsub,np.size(self.t),self.n_splits,self.num_labels,self.num_labels))*np.nan
 
     def standardize(self, X_train, X_test):
         """
@@ -359,4 +376,5 @@ class Classification:
         self.conf_mat[isub,itime,ifold] = confusion_matrix(y_test,y_pred=self.classifier.predict(X_test))
 
         print(f'{round(((ifold+1)/self.n_splits)*100,1)}% ',end='\r')
-
+        if ifold+1==self.n_splits:
+            print('                  ',end='\r')
