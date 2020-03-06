@@ -10,7 +10,7 @@ from sklearn.metrics import confusion_matrix
 import mord
 
 class Experiment:
-    def __init__(self,experiment_name,data_dir,test=False):
+    def __init__(self,experiment_name ,data_dir , info_from_file = True, test = False):
 
         self.experiment_name = experiment_name
         self.data_dir = Path(data_dir)
@@ -26,6 +26,10 @@ class Experiment:
         self.artifact_idx_files = None
         self.info_files = None
 
+        if info_from_file:
+            self.info = self.load_info(0)
+            self.info.pop('unique_id')
+            
     def load_eeg(self,isub):
         subj_mat = sio.loadmat(self.xdata_files[isub],variable_names=['xdata'])
         xdata = np.moveaxis(subj_mat['xdata'],[0,1,2],[1,2,0])
