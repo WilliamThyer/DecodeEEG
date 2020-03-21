@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import json
 import pickle
+import os
 
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler
@@ -387,7 +388,7 @@ class Interpreter:
         self.time_step = clfr.wrangl.time_step
         self.trial_average = clfr.wrangl.trial_average
         self.n_splits = clfr.wrangl.n_splits
-        self.labels = clfr.wrangl.labels
+        self.labels = list(clfr.wrangl.labels)
         self.electrodes = clfr.wrangl.electrodes
         self.acc = clfr.acc
         self.acc_shuff = clfr.acc_shuff
@@ -408,13 +409,28 @@ class Interpreter:
 
         results_dict = {}
         for value in values: 
-            results_dict[value] = value
-        
+            results_dict[value] = self.__dict__[value]
+
         import time
-        timestr = time.strftime("%Y%m%d_%H%M%S.p")
+        timestr = time.strftime("%Y%m%d_%H%M%S.pickle")
         filename =  subtitle + timestr
         file_to_save = self.output_dir / filename
         
         with open(file_to_save,'wb') as fp:
             pickle.dump(results_dict,fp,protocol=pickle.HIGHEST_PROTOCOL)
+    
+    def load_results(self,
+                     filename = None
+                    ):
+        if filename is None:
+            list_of_files = self.output_dir.glob('*.pickle')
+            file_to_open = max(list_of_files, key=os.path.getctime)
+            print('No filename provided. Loading most recent results.')
+        else:
+            file_to_open = self.output_dir / filename
+            
+        with open(file_to_open,'rb') as fp:
+            results = pickle.load(fp)
+
+        self.__dict__.update(results)
     
