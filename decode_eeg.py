@@ -3,6 +3,7 @@ import scipy.io as sio
 import numpy as np
 import pandas as pd
 import json
+import pickle
 
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler
@@ -376,3 +377,44 @@ class Classification:
         print(f'{round(((ifold+1)/self.n_splits)*100,1)}% ',end='\r')
         if ifold+1==self.n_splits:
             print('                  ',end='\r')
+    
+class Interpreter:
+    def __init__(
+        self, clfr, output_dir = None
+    ):
+        self.clfr = clfr
+        self.time_window = clfr.wrangl.time_window
+        self.time_step = clfr.wrangl.time_step
+        self.trial_average = clfr.wrangl.trial_average
+        self.n_splits = clfr.wrangl.n_splits
+        self.labels = clfr.wrangl.labels
+        self.electrodes = clfr.wrangl.electrodes
+        self.acc = clfr.acc
+        self.acc_shuff = clfr.acc_shuff
+        self.conf_mat = clfr.conf_mat
+
+        if output_dir:
+            self.output_dir = output_dir
+        else:
+            self.output_dir = Path('./output')
+
+    def save_results(self, 
+                    subtitle = '',
+                    additional_values = None
+                    ):
+        values = ['time_window','time_step','trial_average','n_splits','labels', 'electrodes','acc','acc_shuff','conf_mat']
+        if additional_values:
+            values.append(additional_values)
+
+        results_dict = {}
+        for value in values: 
+            results_dict[value] = value
+        
+        import time
+        timestr = time.strftime("%Y%m%d_%H%M%S.p")
+        filename =  subtitle + timestr
+        file_to_save = self.output_dir / filename
+        
+        with open(file_to_save,'wb') as fp:
+            pickle.dump(results_dict,fp,protocol=pickle.HIGHEST_PROTOCOL)
+    
