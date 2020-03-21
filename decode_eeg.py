@@ -1,10 +1,14 @@
 from pathlib import Path
 import scipy.io as sio
+import scipy.stats as sista
+from statsmodels.stats.multitest import multipletests
 import numpy as np
 import pandas as pd
 import json
 import pickle
 import os
+import matplotlib.pyplot as plt
+import time
 
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler
@@ -20,8 +24,8 @@ class Experiment:
         self.xdata_files = list(self.data_dir.glob('*xdata*.mat'))
         self.ydata_files = list(self.data_dir.glob('*ydata*.mat'))
         if test:
-            self.xdata_files = [self.xdata_files[0]]
-            self.ydata_files = [self.ydata_files[0]]
+            self.xdata_files = self.xdata_files[0:2]
+            self.ydata_files = self.ydata_files[0:2]
         self.nsub = len(self.xdata_files)
 
         self.behavior_files = None
@@ -381,9 +385,10 @@ class Classification:
     
 class Interpreter:
     def __init__(
-        self, clfr, output_dir = None
-    ):
+        self, clfr, subtitle = '', output_dir = None
+                ):
         self.clfr = clfr
+        self.t = clfr.wrangl.t
         self.time_window = clfr.wrangl.time_window
         self.time_step = clfr.wrangl.time_step
         self.trial_average = clfr.wrangl.trial_average
@@ -394,16 +399,20 @@ class Interpreter:
         self.acc_shuff = clfr.acc_shuff
         self.conf_mat = clfr.conf_mat
 
+        self.timestr = time.strftime("%Y%m%d_%H%M%S.pickle")
+        self.subtitle = subtitle
+        self.filename = self.subtitle + self.timestr
+
         if output_dir:
             self.output_dir = output_dir
         else:
             self.output_dir = Path('./output')
-
-    def save_results(self, 
-                    subtitle = '',
+        self.fig_dir = self.output_dir / 'figures'
+        
+    def save_results(self,
                     additional_values = None
                     ):
-        values = ['time_window','time_step','trial_average','n_splits','labels', 'electrodes','acc','acc_shuff','conf_mat']
+        values = ['t','time_window','time_step','trial_average','n_splits','labels', 'electrodes','acc','acc_shuff','conf_mat']
         if additional_values:
             values.append(additional_values)
 
@@ -411,9 +420,7 @@ class Interpreter:
         for value in values: 
             results_dict[value] = self.__dict__[value]
 
-        import time
-        timestr = time.strftime("%Y%m%d_%H%M%S.pickle")
-        filename =  subtitle + timestr
+        filename =  self.subtitle + self.timestr
         file_to_save = self.output_dir / filename
         
         with open(file_to_save,'wb') as fp:
@@ -422,15 +429,75 @@ class Interpreter:
     def load_results(self,
                      filename = None
                     ):
+
         if filename is None:
             list_of_files = self.output_dir.glob('*.pickle')
             file_to_open = max(list_of_files, key=os.path.getctime)
             print('No filename provided. Loading most recent results.')
         else:
             file_to_open = self.output_dir / filename
-            
+
         with open(file_to_open,'rb') as fp:
             results = pickle.load(fp)
 
         self.__dict__.update(results)
     
+    def savefig(self, plot_type = '', file_format = '.pdf', save = True):
+        if save:
+            output = self.fig_dir / plot_type + self.filename + file_format
+            plt.savefig(output,bbox_inches='tight',dpi = 1000,format=file_format[1:])
+            print(f'Saving {output}')
+
+    def plot_acc(self, significance_testing = False, stim_time = [0,250],
+                 savefig=False, title = False,lower=.15,upper=.6):
+
+        acc = np.mean(self.acc,2)
+
+        se = sista.sem(acc,0)
+        acc_mean = np.mean(acc,0)
+        upper_bound, lower_bound = acc_mean + se, acc_mean - se
+        chance = 1/(len(self.labels))
+
+        # plotting
+        ax = plt.subplot(111)
+
+        ax.fill_between(stim_time,[lower,lower],[upper,upper],color='gray',alpha=.5)
+        ax.plot(self.t,np.ones((len(self.t)))*chance,'--',color='gray')
+        ax.fill_between(self.t,upper_bound,lower_bound, alpha=.5,color='tomato')
+        ax.plot(self.t,acc_mean,color='tab:red')
+
+        # Significance Testing
+        if significance_testing:
+            p = np.zeros((self.t.shape[0]))
+            for i in range(len(self.t)):
+                # wilcoxon is non-parametric paired ttest basically
+                _,p[i] = sista.ttest_1samp(a=acc[:,i], popmean=chance)
+
+            # Use Benjamini-Hochberg procedure for multiple comparisons, defaults to FDR of .05
+            _,corrected_p,_,_ = multipletests(p,method='fdr_bh')
+            sig05 = corrected_p < .05
+
+            plt.scatter(self.t[sig05], np.ones(sum(sig05))*(chance-.05), 
+                        marker = 'o', s=25, c = 'tab:red')
+        
+        # aesthetics
+        ax.spines['right'].set_visible(False)
+        ax.spines['top'].set_visible(False)
+        ax.yaxis.set_ticks_position('left')
+        ax.xaxis.set_ticks_position('bottom')
+        ax.yaxis.set_ticks(np.arange(lower+.05,upper+.01,.1))
+        plt.setp(ax.get_xticklabels(), fontsize=14)
+        plt.setp(ax.get_yticklabels(), fontsize=14)
+
+        # labelling
+        plt.xlabel('Time from Stimulus Onset (ms)', fontsize=14)
+        plt.ylabel('Accuracy', fontsize=14)
+        ax.text(0.8, chance-.02, 'Chance', transform=ax.transAxes, fontsize=12,
+                verticalalignment='top', color='grey')
+        ax.text(0.2165, .945, 'Stim', transform=ax.transAxes, fontsize=12,
+                verticalalignment='top', color='white')
+        
+        self.savefig('acc',save=savefig)
+
+
+            
