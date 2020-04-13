@@ -323,6 +323,19 @@ class Wrangler:
             X_test = np.mean(X_test_all[...,time_window_idx],2)
 
             yield X_train, X_test
+    
+    def roll_over_time_temp_gen(self,X_train_all, X_test_all):
+
+        for self.itime1, time1 in enumerate(self.t):
+            for self.itime2, time2 in enumerate(self.t):
+                time_window_idx1 = (self.samples >= time1) & (self.samples < time1 + self.time_window)
+                time_window_idx2 = (self.samples >= time2) & (self.samples < time2 + self.time_window)
+                
+                # Data for this time bin
+                X_train = np.mean(X_train_all[...,time_window_idx1],2)
+                X_test = np.mean(X_test_all[...,time_window_idx2],2)
+
+                yield X_train, X_test
 
     def train_test_custom_split(self,xdata_train,xdata_test,ydata_train,ydata_test):
 
@@ -388,6 +401,19 @@ class Classification:
         print(f'{round(((ifold+1)/self.n_splits)*100,1)}% ',end='\r')
         if ifold+1==self.n_splits:
             print('                  ',end='\r')
+    
+    def decode_temp_gen(self,X_train, X_test, y_train, y_test, isub):
+        ifold = self.wrangl.ifold
+        itime1 = self.wrangl.itime1
+        itime2 = self.wrangl.itime2
+
+        X_train, X_test = self.standardize(X_train, X_test)
+        
+        self.classifier.fit(X_train, y_train)
+
+        self.acc[isub,itime1,itime2,ifold] = self.classifier.score(X_test,y_test)
+        self.acc_shuff[isub,itime1,itime2,ifold] = self.classifier.score(X_test,np.random.permutation(y_test))
+        self.conf_mat[isub,itime1,itime2,ifold] = confusion_matrix(y_test,y_pred=self.classifier.predict(X_test))
     
 class Interpreter:
     def __init__(
@@ -504,6 +530,28 @@ class Interpreter:
                 verticalalignment='top', color='white')
         
         self.savefig('acc',save=savefig)
+    
+    def temporal_generalizability(self,cmap=plt.cm.viridis,lower_lim=0, upper_lim=1, savefig = False):
+        """
+        Plot temporal generalizability
+
+        Inputs:
+
+        """
+
+        plt.figure()
+        plt.imshow(np.mean(np.mean(self.acc,0),2), interpolation='nearest', cmap=cmap, clim = (lower_lim,upper_lim))
+        # plt.title('Accuracy for Training/Testing\non Different Timepoints')
+        plt.colorbar()
+        
+        tick_marks = np.arange(0,len(self.t),10)
+        
+        plt.xticks(tick_marks,self.t[0::10])
+        plt.yticks(tick_marks,self.t[0::10])
+
+        plt.xlabel('Testing Timepoint (ms)')
+        plt.ylabel('Training Timepoint (ms)')
+        plt.gca().invert_yaxis()
 
 class ERP:
     def __init__(self, exp, subtitle = '', fig_dir = None):
