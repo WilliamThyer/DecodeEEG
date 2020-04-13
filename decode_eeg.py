@@ -72,8 +72,8 @@ class Experiment:
         useful for removing behavior trials not included in EEG data
         """
         if not self.artifact_idx_files:
-            self.artifact_idx_files = list(self.data_dir.glob('*idx*.mat'))
-        artifact_idx = np.squeeze(sio.loadmat(self.artifact_idx_files[isub])['filt_idx']==1)
+            self.artifact_idx_files = list(self.data_dir.glob('*artifact_idx*.mat'))
+        artifact_idx = np.squeeze(sio.loadmat(self.artifact_idx_files[isub])['artifact_idx']==1)
 
         return artifact_idx
     
@@ -225,7 +225,7 @@ class Wrangler:
 
         self.t = samples[0:samples.shape[0]-int(time_window/self.sample_step)+1:int(time_step/self.sample_step)]
         
-    def select_labels(self, xdata, ydata):
+    def select_labels(self, xdata, ydata, return_idx = True):
         """
         includes labels only wanted for decoding
 
@@ -239,7 +239,10 @@ class Wrangler:
         xdata = xdata[label_idx,:,:]
         ydata = ydata[label_idx]
 
-        return xdata, ydata
+        if return_idx:
+            return xdata, ydata, label_idx
+        else:
+            return xdata, ydata
 
     def group_labels(self,xdata,ydata,empty_val=9999):
         
@@ -292,7 +295,7 @@ class Wrangler:
         xdata,ydata = self.average_trials(xdata,ydata)
         return xdata,ydata
 
-    def train_test_split(self, xdata, ydata):
+    def train_test_split(self, xdata, ydata, return_idx=False):
         """
         returns xtrain and xtest data and respective labels
         """        
@@ -302,7 +305,10 @@ class Wrangler:
             X_train_all, X_test_all = xdata[train_index], xdata[test_index]
             y_train, y_test = ydata[train_index].astype(int), ydata[test_index].astype(int)
 
-            yield X_train_all, X_test_all, y_train, y_test
+            if return_idx:
+                yield X_train_all, X_test_all, y_train, y_test, test_index
+            else:
+                yield X_train_all, X_test_all, y_train, y_test
             self.ifold += 1
     
     def roll_over_time(self, X_train_all, X_test_all):
@@ -499,5 +505,141 @@ class Interpreter:
         
         self.savefig('acc',save=savefig)
 
+class ERP:
+    def __init__(self, exp, subtitle = '', fig_dir = None):
+        self.exp = exp
+        self.info = exp.info        
+        self.xdata_files = exp.xdata_files
+        self.ydata_files = exp.ydata_files
 
+        self.timestr = time.strftime("%Y%m%d_%H%M%S")
+        self.subtitle = subtitle
+
+        if fig_dir:
+            self.fig_dir = fig_dir
+        else:
+            self.fig_dir = Path('output/figures')
+
+    def savefig(self, subtitle = '', file_format = '.pdf', save = True):
+        if save:
+            filename = self.subtitle + subtitle + self.timestr + file_format
+            output = self.fig_dir / filename
+            plt.savefig(output,bbox_inches='tight',dpi = 1000,format=file_format[1:])
+            print(f'Saving {output}')
+
+    def load_all_eeg(self):
+        
+        xdata_all = np.empty((self.exp.nsub),dtype='object')
+        ydata_all = np.empty((self.exp.nsub),dtype='object')
+        for isub in range(self.exp.nsub):
+            xdata_all[isub], ydata_all[isub] = self.exp.load_eeg(isub)
+        return xdata_all, ydata_all
+
+    def _select_electrodes(self, xdata, electrode_subset = None, electrode_idx = None):
+        
+        if electrode_subset is not None:
+            # Create index for electrodes to include in plot
+            electrode_labels = [el for n, el in enumerate(self.info['chan_labels']) if el.startswith(electrode_subset)]
+            electrode_idx = np.in1d(self.info['chan_labels'],electrode_labels)
+            xdata = xdata[electrode_idx]
+        elif electrode_idx is not None:
+            xdata = xdata[electrode_idx]
+
+        return xdata
+
+    def plot_ss(self, xdata_all, ydata_all, subtitle = '',
+                electrode_subset=None, electrode_idx = None,
+                savefig=False):
+        
+        ss_data = np.zeros((self.exp.nsub,len(np.unique(ydata_all[0])),len(self.info['times']))) #hardcode
+        for isub in range(self.exp.nsub):
+            xdata = xdata_all[isub]
+            ydata = ydata_all[isub]
+            for iss,ss in enumerate(np.unique(ydata_all[0])):
+                ss_idx = ydata == ss
+                data = np.mean(xdata[ss_idx],0)
+                ss_data[isub,iss] = np.mean(self._select_electrodes(data,electrode_subset,electrode_idx),0)
+
+                
+        ax = plt.subplot(111)
+        for iss,ss in enumerate(np.unique(ydata_all[0])):
+            x = np.mean(ss_data[:,iss],0)
+            se = np.std(ss_data[:,iss],0)/np.sqrt(self.exp.nsub)
+            
+            # ERP
+            plt.plot(self.info['times'],x, label=f'{ss}',linewidth=2.5,alpha=0.8)
+            # SE
+            plt.fill_between(self.info['times'],x-se,x+se,alpha=.3)
+
+        # Grey stim bar
+        upper = 6
+        lower = -4
+        plt.fill_between([0,250],[upper,upper],[lower,lower],color='gray',alpha=.1)
+
+        # Hide the right and top spines]
+        ax.spines['right'].set_visible(False)
+        ax.spines['top'].set_visible(False)
+
+        # Only show ticks on the left and bottom spines
+        ax.yaxis.set_ticks_position('left')
+        ax.xaxis.set_ticks_position('bottom')
+
+        # Cleaning up plot
+        plt.gca().invert_yaxis()
+        plt.legend(title = 'Set Size', loc='lower right')
+        plt.xlabel('Time from Array Onset (ms)')
+        plt.ylabel("Amplitude (microvolts)")
+
+        self.savefig(subtitle=subtitle,save=savefig)
+
+    def plot_feat(self, xdata_all, ydata_all, subtitle = '',
+                  electrode_subset=None, electrode_idx = None,
+                  savefig=False):
+        # first dimension of xdata_all should be exp
+
+        mean_exp = np.empty((len(xdata_all),len(self.info['times'])))
+        se_exp = np.empty((len(xdata_all),len(self.info['times'])))
+
+        for iexp in range(len(xdata_all)):
+            xdata_exp = xdata_all[iexp]
+            ydata_exp = ydata_all[iexp]
+            xdata_subs = np.empty((len(xdata_exp),len(self.info['times'])))
+            for isub in range(len(xdata_exp)):
+                xdata,ydata = xdata_exp[isub],ydata_exp[isub]
+                xdata = np.mean(xdata[ydata==1],0)
+                xdata_subs[isub] = np.mean(self._select_electrodes(xdata,('P','O','C')),0)
+            
+            mean_exp[iexp] = np.mean(xdata_subs,0)
+            se_exp[iexp] = np.std(xdata_subs,0)/np.sqrt(xdata_subs.shape[0])
+
+        ax = plt.subplot(111)
+        feats = ['Color','Orientation','Conjunction']
+        for iexp,exp in enumerate(feats):
+            x = mean_exp[iexp]
+            se = se_exp[iexp]
+            
+            # ERP
+            plt.plot(self.info['times'],x,label = f'{exp}',linewidth=2.5,alpha=0.8)
+            # SE
+            plt.fill_between(self.info['times'],x-se,x+se,alpha=.3)
+            
+        # Grey stim bar
+        upper = 6
+        lower = -4
+        plt.fill_between([0,250],[upper,upper],[lower,lower],color='gray',alpha=.1)
+
+        # Hide the right and top spines]
+        ax.spines['right'].set_visible(False)
+        ax.spines['top'].set_visible(False)
+
+        # Only show ticks on the left and bottom spines
+        ax.yaxis.set_ticks_position('left')
+        ax.xaxis.set_ticks_position('bottom')
+
+        # Cleaning up plot
+        plt.gca().invert_yaxis()
+        plt.legend(title = 'Feature', loc='lower right')
+        plt.xlabel('Time from Array Onset (ms)')
+        plt.ylabel("Amplitude (microvolts)")
+        
             
