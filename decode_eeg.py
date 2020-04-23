@@ -9,6 +9,8 @@ import pickle
 import os
 import matplotlib.pyplot as plt
 import time
+import itertools
+from copy import copy
 
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler
@@ -173,7 +175,18 @@ class Experiment_Syncer:
         xdata,ydata = self.balance_labels(xdata,ydata)
         xdata,ydata = self.average_trials(xdata,ydata)
         return xdata,ydata
+    
+    def pairwise(self, xdata_all, ydata_all):
+        xdata,ydata = copy(xdata_all),copy(ydata_all)
+        for self.wrangler.iss,ss in enumerate(self.wrangler.group_dict_list):
+            xdata,ydata = copy(xdata_all),copy(ydata_all)
 
+            self.wrangler.group_dict = ss
+            
+            for exp_name in self.experiment_names:
+                xdata[exp_name], ydata[exp_name] = self.wrangler.group_labels(xdata[exp_name], ydata[exp_name])
+            yield xdata, ydata
+        
     def group_data(self,xdata,ydata):
         xdata_train,xdata_test=None,None
 
@@ -201,6 +214,7 @@ class Wrangler:
         trial_average,
         n_splits,
         group_dict = None,
+        group_dict_list = None,
         labels = None,
         electrodes = None):
 
@@ -211,15 +225,23 @@ class Wrangler:
         self.trial_average = trial_average
         self.n_splits = n_splits
         self.group_dict = group_dict
+        self.group_dict_list = group_dict_list
         self.labels = labels
         self.electrodes = electrodes
 
-        if self.group_dict: 
-            self.labels = self.group_dict.keys()
-        if self.labels:
-            self.num_labels = len(self.labels)
+        if self.group_dict_list:
+            self.labels = []
+            self.num_labels = []
+            for i in group_dict_list:
+                self.labels.append(i.values())
+                self.num_labels.append(len(i))
         else:
-            self.num_labels = None
+            if self.group_dict: 
+                self.labels = self.group_dict.values()
+            if self.labels:
+                self.num_labels = len(self.labels)
+            else:
+                self.num_labels = None
 
         self.cross_val = StratifiedShuffleSplit(n_splits=self.n_splits)
 
@@ -255,6 +277,11 @@ class Wrangler:
 
         trial_idx = ydata_new == empty_val
         return xdata_new[~trial_idx],ydata_new[~trial_idx]
+    
+    def pairwise(self,xdata,ydata):
+        for self.iss,ss in enumerate(self.group_dict_list):
+            self.group_dict = ss
+            yield self.group_labels(xdata,ydata)
         
     def balance_labels(self,xdata,ydata,downsamp=None):
         unique_labels, counts_labels = np.unique(ydata, return_counts=True)
@@ -355,8 +382,8 @@ class Classification:
         self.wrangl = wrangl
         self.n_splits = wrangl.n_splits
         self.t = wrangl.t
-        if num_labels: self.num_labels = num_labels
         if wrangl.num_labels: self.num_labels = wrangl.num_labels
+        if num_labels: self.num_labels = num_labels
         if self.num_labels is None: 
             raise Exception('Must provide number of num_labels to Classification')
             
@@ -402,6 +429,19 @@ class Classification:
         if ifold+1==self.n_splits:
             print('                  ',end='\r')
     
+    def decode_pairwise(self, X_train, X_test, y_train, y_test, isub):
+        ifold = self.wrangl.ifold
+        itime = self.wrangl.itime
+        iss = self.wrangl.iss
+
+        X_train, X_test = self.standardize(X_train, X_test)
+        
+        self.classifier.fit(X_train, y_train)
+
+        self.acc[isub,iss,itime,ifold] = self.classifier.score(X_test,y_test)
+        self.acc_shuff[isub,iss,itime,ifold] = self.classifier.score(X_test,np.random.permutation(y_test))
+        self.conf_mat[isub,iss,itime,ifold] = confusion_matrix(y_test,y_pred=self.classifier.predict(X_test))
+
     def decode_temp_gen(self,X_train, X_test, y_train, y_test, isub):
         ifold = self.wrangl.ifold
         itime1 = self.wrangl.itime1
@@ -431,9 +471,8 @@ class Interpreter:
         self.acc_shuff = clfr.acc_shuff
         self.conf_mat = clfr.conf_mat
 
-        self.timestr = time.strftime("%Y%m%d_%H%M%S.pickle")
+        self.timestr = time.strftime("%Y%m%d_%H%M")
         self.subtitle = subtitle
-        self.filename = self.subtitle + self.timestr
 
         if output_dir:
             self.output_dir = output_dir
@@ -452,7 +491,7 @@ class Interpreter:
         for value in values: 
             results_dict[value] = self.__dict__[value]
 
-        filename =  self.subtitle + self.timestr
+        filename =  self.subtitle + self.timestr + '.pickle'
         file_to_save = self.output_dir / filename
         
         with open(file_to_save,'wb') as fp:
@@ -474,13 +513,14 @@ class Interpreter:
 
         self.__dict__.update(results)
     
-    def savefig(self, plot_type = '', file_format = '.pdf', save = True):
+    def savefig(self, subtitle = '', file_format = '.pdf', save = True):
         if save:
-            output = self.fig_dir / plot_type + self.filename + file_format
+            filename = self.subtitle + subtitle + self.timestr + file_format
+            output = self.fig_dir / filename
             plt.savefig(output,bbox_inches='tight',dpi = 1000,format=file_format[1:])
             print(f'Saving {output}')
 
-    def plot_acc(self, significance_testing = False, stim_time = [0,250],
+    def plot_acc(self, subtitle='', significance_testing = False, stim_time = [0,250],
                  savefig=False, title = False,lower=.15,upper=.6):
 
         acc = np.mean(self.acc,2)
@@ -509,7 +549,7 @@ class Interpreter:
             _,corrected_p,_,_ = multipletests(p,method='fdr_bh')
             sig05 = corrected_p < .05
 
-            plt.scatter(self.t[sig05], np.ones(sum(sig05))*(chance-.05), 
+            plt.scatter(self.t[sig05]-10, np.ones(sum(sig05))*(chance-.05), 
                         marker = 'o', s=25, c = 'tab:red')
         
         # aesthetics
@@ -520,17 +560,63 @@ class Interpreter:
         ax.yaxis.set_ticks(np.arange(lower+.05,upper+.01,.1))
         plt.setp(ax.get_xticklabels(), fontsize=14)
         plt.setp(ax.get_yticklabels(), fontsize=14)
-
+        print(chance)
         # labelling
         plt.xlabel('Time from Stimulus Onset (ms)', fontsize=14)
         plt.ylabel('Accuracy', fontsize=14)
-        ax.text(0.8, chance-.02, 'Chance', transform=ax.transAxes, fontsize=12,
+        ax.text(0.8, chance-.2, 'Chance', transform=ax.transAxes, fontsize=12,
                 verticalalignment='top', color='grey')
         ax.text(0.2165, .945, 'Stim', transform=ax.transAxes, fontsize=12,
                 verticalalignment='top', color='white')
         
-        self.savefig('acc',save=savefig)
-    
+        plt.show()
+        self.savefig('acc'+subtitle,save=savefig)
+
+    def plot_conf_mat(self, subtitle='', color_map = plt.cm.RdGy_r, lower=0,upper=1, savefig = False,subplot = 111):
+        """
+        plots the confusion matrix for the classifier
+
+        Input:
+        self.conf_mat of shape [subjects,timepoints,folds,setsizeA,setsizeB]
+        """
+        cm = np.mean(np.mean(np.mean(self.conf_mat[:,self.t>250],2),1),0)
+        
+        #Normalize
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        
+        # Generate plot
+        ax = plt.subplot(subplot)
+        
+        plt.imshow(cm, interpolation='nearest', cmap=color_map, clim = (lower,upper))
+        
+        thresh = np.percentile([lower,upper], [25, 75]) #for font color readability
+        for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+            if cm[i,j] > thresh[1] or cm[i,j] < thresh[0]:
+                color = 'white'
+            else:
+                color = 'black'
+            ax.text(j, i, format(cm[i, j], '.2f' ),
+                    horizontalalignment="center",
+                    color=color,
+                    fontsize=16)
+
+        # plt.title(title)
+        plt.colorbar()
+        labels = [item for sublist in self.labels for item in sublist]
+        tick_marks = np.arange(len(labels))
+        plt.xticks(tick_marks, labels)
+        plt.yticks(tick_marks, labels)
+        plt.ylabel('True Set Size', fontsize=14)
+        plt.xlabel('Predicted Set Size',fontsize=14)
+        plt.tight_layout()
+        plt.gca().invert_yaxis()
+
+        plt.setp(ax.get_xticklabels(), fontsize=14)
+        plt.setp(ax.get_yticklabels(), fontsize=14)
+        plt.show()
+        self.savefig('conf_mat'+subtitle,save=savefig)
+
+
     def temporal_generalizability(self,cmap=plt.cm.viridis,lower_lim=0, upper_lim=1, savefig = False):
         """
         Plot temporal generalizability
@@ -544,14 +630,42 @@ class Interpreter:
         # plt.title('Accuracy for Training/Testing\non Different Timepoints')
         plt.colorbar()
         
-        tick_marks = np.arange(0,len(self.t),10)
+        tick_marks = np.arange(0,len(self.t),4)
         
-        plt.xticks(tick_marks,self.t[0::10])
-        plt.yticks(tick_marks,self.t[0::10])
+        plt.xticks(tick_marks,self.t[0::4])
+        plt.yticks(tick_marks,self.t[0::4])
 
         plt.xlabel('Testing Timepoint (ms)')
         plt.ylabel('Training Timepoint (ms)')
         plt.gca().invert_yaxis()
+
+        self.savefig('temp_gen_',save=savefig)
+
+    def plot_acc_pairwise(self,subtitle='',significance_testing = False, stim_time = [0,250],
+                     savefig=False, title = False,lower=.15,upper=.6):
+        labels = copy(self.labels)
+        acc = copy(self.acc)
+
+        for iss,ss in enumerate(labels):
+            self.labels = list(ss)
+            self.acc = acc[:,iss]
+            ss_subtitle = subtitle + str(list(ss))[1:-1]
+            self.plot_acc(subtitle=ss_subtitle,significance_testing=significance_testing, stim_time=stim_time,
+                          savefig=savefig,title=title,lower=lower,upper=upper)
+        self.labels = labels
+        self.acc = acc
+
+    def plot_conf_mat_pairwise(self, subtitle='', color_map = plt.cm.RdGy_r, lower=0,upper=1, savefig = False):
+        labels = copy(self.labels)
+        conf_mat = copy(self.conf_mat)
+
+        for iss,ss in enumerate(labels):
+            self.labels = list(ss)
+            self.conf_mat = conf_mat[:,iss]
+            ss_subtitle = subtitle + str(list(ss))[1:-1]
+            self.plot_conf_mat(subtitle=ss_subtitle, color_map=color_map,savefig=savefig,lower=lower,upper=upper)
+        self.labels = labels
+        self.conf_mat = conf_mat
 
 class ERP:
     def __init__(self, exp, subtitle = '', fig_dir = None):
@@ -620,8 +734,8 @@ class ERP:
             plt.fill_between(self.info['times'],x-se,x+se,alpha=.3)
 
         # Grey stim bar
-        upper = 6
-        lower = -4
+        upper = 2
+        lower = -2
         plt.fill_between([0,250],[upper,upper],[lower,lower],color='gray',alpha=.1)
 
         # Hide the right and top spines]
@@ -690,4 +804,5 @@ class ERP:
         plt.xlabel('Time from Array Onset (ms)')
         plt.ylabel("Amplitude (microvolts)")
         
-            
+        self.savefig(subtitle=subtitle,save=savefig)
+
